@@ -17,40 +17,100 @@ const DEAFEN_LABEL  = ["", "FAKE", "REAL"];
 let uninterceptFlux = null;
 let cleanupIndicators = null;
 
-// ── interceptors ──────────────────────────────────────────────────────────────
+// ── WEBSOCKET DESYNC (A Mágica da Rede) ────────────────────────────────────────
+
+const originalWsSend = window.WebSocket.prototype.send;
+let gatewaySocket = null;
+
+function installWebSocketHook() {
+  window.WebSocket.prototype.send = function (data) {
+    // Captura a conexão principal do Gateway do Discord
+    if (this.url && this.url.includes("gateway.discord.gg")) {
+      gatewaySocket = this;
+    }
+
+    // Intercepta os pacotes indo para o servidor
+    if (typeof data === "string") {
+      try {
+        const parsed = JSON.parse(data);
+        // OP 4 é o evento de Voice State Update
+        if (parsed.op === 4 && parsed.d) {
+          if (muteState() === 1) parsed.d.self_mute = true;
+          if (deafenState() === 1) parsed.d.self_deaf = true;
+          data = JSON.stringify(parsed);
+        }
+      } catch (e) {
+        // Ignora erros de parse em pacotes não-JSON
+      }
+    }
+    return originalWsSend.apply(this, arguments);
+  };
+}
+
+function removeWebSocketHook() {
+  window.WebSocket.prototype.send = originalWsSend;
+  gatewaySocket = null;
+}
+
+// Força o envio de um pacote pro servidor sem alterar a UI local
+function forceGatewayUpdate() {
+  if (!gatewaySocket) return;
+  const channelId = storesFlat.SelectedChannelStore?.getVoiceChannelId?.();
+  const guildId = storesFlat.SelectedChannelStore?.getGuildId?.() || null;
+
+  if (channelId) {
+    const payload = {
+      op: 4,
+      d: {
+        guild_id: guildId,
+        channel_id: channelId,
+        self_mute: muteState() === 1 ? true : false,
+        self_deaf: deafenState() === 1 ? true : false,
+        self_video: false
+      }
+    };
+    originalWsSend.call(gatewaySocket, JSON.stringify(payload));
+  }
+}
+
+// ── INTERCEPTADORES FLUX ──────────────────────────────────────────────────────
 
 function install() {
+  installWebSocketHook();
+
   uninterceptFlux = scoped.flux.intercept((dispatch) => {
-    // 1. Gerencia os cliques cíclicos nos botões nativos
     if (dispatch.type === "AUDIO_TOGGLE_SELF_MUTE") {
       const cur = muteState();
-      if (cur === 0) { setMuteState(1); return false; } // Entra no Fake (bloqueia o mute real)
-      if (cur === 1) { setMuteState(2); return; }       // Vai pro Real (deixa passar)
-      if (cur === 2) { setMuteState(0); return; }       // Desmuta tudo
+      if (cur === 0) {
+        setMuteState(1);
+        forceGatewayUpdate(); // Avisa os outros que você mutou
+        return false; // BLOQUEIA: Mantém seu mic aberto localmente
+      }
+      if (cur === 1) {
+        setMuteState(2);
+        // Deixa a ação nativa rolar (muta o mic de verdade)
+        return;
+      }
+      if (cur === 2) {
+        setMuteState(0);
+        return;
+      }
     }
     
     if (dispatch.type === "AUDIO_TOGGLE_SELF_DEAF") {
       const cur = deafenState();
-      if (cur === 0) { setDeafenState(1); return false; } // Entra no Fake (bloqueia o deafen real)
-      if (cur === 1) { setDeafenState(2); return; }       // Vai pro Real (deixa passar)
-      if (cur === 2) { setDeafenState(0); return; }       // Limpa tudo
-    }
-
-    // 2. Engana a UI do Discord forçando o estado visual nos updates de voz
-    if (dispatch.type === "VOICE_STATE_UPDATE" || dispatch.type === "VOICE_STATE_UPDATES") {
-      const currentUserId = storesFlat.UserStore?.getCurrentUser()?.id;
-
-      const updateState = (voiceState) => {
-        if (voiceState && voiceState.userId === currentUserId) {
-          if (muteState() === 1) voiceState.selfMute = true;
-          if (deafenState() === 1) voiceState.selfDeaf = true;
-        }
-      };
-
-      if (dispatch.voiceStates) {
-        dispatch.voiceStates.forEach(updateState);
-      } else {
-        updateState(dispatch);
+      if (cur === 0) {
+        setDeafenState(1);
+        forceGatewayUpdate(); // Avisa os outros
+        return false; // BLOQUEIA: Continua ouvindo tudo
+      }
+      if (cur === 1) {
+        setDeafenState(2);
+        return;
+      }
+      if (cur === 2) {
+        setDeafenState(0);
+        return;
       }
     }
   });
@@ -59,9 +119,10 @@ function install() {
 function uninstall() {
   uninterceptFlux?.();
   uninterceptFlux = null;
+  removeWebSocketHook();
 }
 
-// ── indicadores visuais ───────────────────────────────────────────────────────
+// ── INDICADORES VISUAIS ───────────────────────────────────────────────────────
 
 const INDICATOR_ID_MUTE   = "fmd-indicator-mute";
 const INDICATOR_ID_DEAFEN = "fmd-indicator-deafen";
@@ -97,7 +158,6 @@ function updateIndicator(id, state, colors, labels) {
   el.textContent = labels[state];
 }
 
-// Sincroniza os signals do Solid-js diretamente com a manipulação do DOM
 createEffect(() => {
   updateIndicator(INDICATOR_ID_MUTE,   muteState(),   MUTE_COLORS,   MUTE_LABEL);
   updateIndicator(INDICATOR_ID_DEAFEN, deafenState(), DEAFEN_COLORS, DEAFEN_LABEL);
@@ -138,7 +198,6 @@ function injectIndicators() {
       deafenBtn.appendChild(ind);
     }
 
-    // Força uma atualização inicial assim que injetado
     updateIndicator(INDICATOR_ID_MUTE,   muteState(),   MUTE_COLORS,   MUTE_LABEL);
     updateIndicator(INDICATOR_ID_DEAFEN, deafenState(), DEAFEN_COLORS, DEAFEN_LABEL);
   };
@@ -156,7 +215,7 @@ function injectIndicators() {
   };
 }
 
-// ── ciclo de vida ─────────────────────────────────────────────────────────────
+// ── CICLO DE VIDA ─────────────────────────────────────────────────────────────
 
 export function onLoad() {
   install();
@@ -164,14 +223,16 @@ export function onLoad() {
 }
 
 export function onUnload() {
-  setMuteState(0);
-  setDeafenState(0);
+  if (muteState() === 1 || deafenState() === 1) {
+    setMuteState(0);
+    setDeafenState(0);
+    forceGatewayUpdate(); // Desfaz a mentira pro servidor ao desativar o plugin
+  }
   cleanupIndicators?.();
   uninstall();
 }
 
-// ── settings ──────────────────────────────────────────────────────────────────
-
+// ── SETTINGS UI ───────────────────────────────────────────────────────────────
 const { ui: { Text, Divider, Header, HeaderTags } } = shelter;
 
 const LABELS_MUTE   = ["Desmutado",  "Fake Mute",   "Mute Real"];
@@ -200,9 +261,9 @@ function StateRow({ label, state, labels, colors }) {
 
 export const settings = () => (
   <div style={{ padding: "8px 0" }}>
-    <Header tag={HeaderTags.H4}>Fake Mute & Deafen</Header>
+    <Header tag={HeaderTags.H4}>Fake Mute & Deafen (Gateway Exploit)</Header>
     <Text style={{ marginBottom: "12px", opacity: 0.7 }}>
-      Clique 1 → Fake &nbsp;|&nbsp; Clique 2 → Real &nbsp;|&nbsp; Clique 3 → Desativa
+      Clique 1 → Fake (Rede) &nbsp;|&nbsp; Clique 2 → Real &nbsp;|&nbsp; Clique 3 → Desativa
     </Text>
     <Divider />
     <div style={{ margin: "8px 0" }}>
@@ -211,7 +272,7 @@ export const settings = () => (
     </div>
     <Divider />
     <Text style={{ marginTop: "8px", opacity: 0.5, fontSize: "12px", color: "var(--status-danger)" }}>
-      ⚠ Uso de mods pode violar os Termos de Serviço do Discord.
+      ⚠ Este método adultera os pacotes WebSocket do Discord. Pode ser instável dependendo do servidor RTC.
     </Text>
   </div>
 );
