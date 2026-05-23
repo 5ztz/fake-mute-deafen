@@ -1,0 +1,11 @@
+{
+  "name": "fake-mute-deafen-shelter",
+  "private": true,
+  "scripts": {
+    "build": "lune build",
+    "dev": "lune dev"
+  },
+  "devDependencies": {
+    "@uwu/lune": "latest"
+  }
+}
