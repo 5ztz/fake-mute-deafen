@@ -51,23 +51,29 @@ const _tmpl$ = /*#__PURE__*/ (0, import_web.template)(`<div><!#><!/><span></span
 const { plugin: { scoped }, flux: { storesFlat } } = shelter;
 const [muteState, setMuteState] = (0, import_solid_js.createSignal)(0);
 const [deafenState, setDeafenState] = (0, import_solid_js.createSignal)(0);
-const LABELS_MUTE = [
-	"Desmutado",
-	"Fake Mute",
-	"Mute Real"
+const MUTE_COLORS = [
+	"transparent",
+	"#faa81a",
+	"#f23f43"
 ];
-const LABELS_DEAFEN = [
-	"Ouvindo",
-	"Fake Deafen",
-	"Deafen Real"
+const DEAFEN_COLORS = [
+	"transparent",
+	"#faa81a",
+	"#f23f43"
 ];
-const COLORS = [
-	"var(--text-muted)",
-	"var(--status-warning, #faa81a)",
-	"var(--status-danger,  #f23f43)"
+const MUTE_LABEL = [
+	"",
+	"FAKE",
+	"REAL"
+];
+const DEAFEN_LABEL = [
+	"",
+	"FAKE",
+	"REAL"
 ];
 let uninterceptFlux = null;
 let uninterceptHttp = null;
+let cleanupIndicators = null;
 function install() {
 	uninterceptFlux = scoped.flux.intercept((dispatch) => {
 		if (dispatch.type === "AUDIO_TOGGLE_SELF_MUTE") {
@@ -113,8 +119,90 @@ function uninstall() {
 	uninterceptFlux = null;
 	uninterceptHttp = null;
 }
+const INDICATOR_ID_MUTE = "fmd-indicator-mute";
+const INDICATOR_ID_DEAFEN = "fmd-indicator-deafen";
+function makeIndicator(id) {
+	const el = document.createElement("div");
+	el.id = id;
+	el.style.cssText = `
+    position: absolute;
+    bottom: -4px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 8px;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    color: #fff;
+    background: transparent;
+    padding: 1px 3px;
+    border-radius: 3px;
+    pointer-events: none;
+    z-index: 999;
+    line-height: 1;
+    white-space: nowrap;
+    transition: background 0.15s;
+  `;
+	return el;
+}
+function updateIndicator(id, state, colors, labels) {
+	const el = document.getElementById(id);
+	if (!el) return;
+	el.style.background = colors[state];
+	el.textContent = labels[state];
+}
+function injectIndicators() {
+	const tryInject = () => {
+		const buttons = document.querySelectorAll("[class*=\"buttonWrapper\"]");
+		let muteBtn = null;
+		let deafenBtn = null;
+		buttons.forEach((btn) => {
+			const label = btn.getAttribute("aria-label") || btn.querySelector("[aria-label]")?.getAttribute("aria-label") || "";
+			if (/mute|mutar|microfone/i.test(label)) muteBtn = btn;
+			if (/deafen|ensurdec|headphone/i.test(label)) deafenBtn = btn;
+		});
+		if (!muteBtn || !deafenBtn) {
+			const voiceBar = document.querySelector("[class*=\"panels\"]") || document.querySelector("[class*=\"voiceControlsContainer\"]");
+			if (voiceBar) {
+				const btns = voiceBar.querySelectorAll("button");
+				if (btns.length >= 2) {
+					muteBtn = muteBtn || btns[0];
+					deafenBtn = deafenBtn || btns[1];
+				}
+			}
+		}
+		if (muteBtn && !document.getElementById(INDICATOR_ID_MUTE)) {
+			muteBtn.style.position = "relative";
+			const ind = makeIndicator(INDICATOR_ID_MUTE);
+			muteBtn.appendChild(ind);
+		}
+		if (deafenBtn && !document.getElementById(INDICATOR_ID_DEAFEN)) {
+			deafenBtn.style.position = "relative";
+			const ind = makeIndicator(INDICATOR_ID_DEAFEN);
+			deafenBtn.appendChild(ind);
+		}
+		updateIndicator(INDICATOR_ID_MUTE, muteState(), MUTE_COLORS, MUTE_LABEL);
+		updateIndicator(INDICATOR_ID_DEAFEN, deafenState(), DEAFEN_COLORS, DEAFEN_LABEL);
+	};
+	tryInject();
+	const obs = scoped.observeDom("[class*=\"panels\"], [class*=\"voiceControlsContainer\"]", () => {
+		setTimeout(tryInject, 100);
+	});
+	const unsubMute = scoped.flux.subscribe("AUDIO_TOGGLE_SELF_MUTE", () => {
+		setTimeout(() => updateIndicator(INDICATOR_ID_MUTE, muteState(), MUTE_COLORS, MUTE_LABEL), 50);
+	});
+	const unsubDeaf = scoped.flux.subscribe("AUDIO_TOGGLE_SELF_DEAF", () => {
+		setTimeout(() => updateIndicator(INDICATOR_ID_DEAFEN, deafenState(), DEAFEN_COLORS, DEAFEN_LABEL), 50);
+	});
+	cleanupIndicators = () => {
+		document.getElementById(INDICATOR_ID_MUTE)?.remove();
+		document.getElementById(INDICATOR_ID_DEAFEN)?.remove();
+		unsubMute?.();
+		unsubDeaf?.();
+	};
+}
 function onLoad() {
 	install();
+	injectIndicators();
 }
 function onUnload() {
 	if (muteState() === 1 || deafenState() === 1) shelter.http.ready.then(() => {
@@ -129,9 +217,25 @@ function onUnload() {
 	});
 	setMuteState(0);
 	setDeafenState(0);
+	cleanupIndicators?.();
 	uninstall();
 }
 const { ui: { Text, Divider, Header, HeaderTags } } = shelter;
+const LABELS_MUTE = [
+	"Desmutado",
+	"Fake Mute",
+	"Mute Real"
+];
+const LABELS_DEAFEN = [
+	"Ouvindo",
+	"Fake Deafen",
+	"Deafen Real"
+];
+const COLORS = [
+	"var(--text-muted)",
+	"#faa81a",
+	"#f23f43"
+];
 function StateRow({ label, state, labels, colors }) {
 	return (() => {
 		const _el$ = (0, import_web$2.getNextElement)(_tmpl$), _el$3 = _el$.firstChild, [_el$4, _co$] = (0, import_web$3.getNextMarker)(_el$3.nextSibling), _el$2 = _el$4.nextSibling;
