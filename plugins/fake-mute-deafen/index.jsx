@@ -1,11 +1,11 @@
-import { createSignal, onCleanup } from "solid-js";
+import { createSignal, createEffect } from "solid-js";
 
 const {
   plugin: { scoped },
   flux: { storesFlat },
 } = shelter;
 
-const [muteState,   setMuteState]   = createSignal(0);
+const [muteState, setMuteState] = createSignal(0);
 const [deafenState, setDeafenState] = createSignal(0);
 
 // 0 = normal, 1 = fake, 2 = real
@@ -15,43 +15,50 @@ const MUTE_LABEL    = ["", "FAKE", "REAL"];
 const DEAFEN_LABEL  = ["", "FAKE", "REAL"];
 
 let uninterceptFlux = null;
-let uninterceptHttp = null;
 let cleanupIndicators = null;
 
 // ── interceptors ──────────────────────────────────────────────────────────────
 
 function install() {
   uninterceptFlux = scoped.flux.intercept((dispatch) => {
+    // 1. Gerencia os cliques cíclicos nos botões nativos
     if (dispatch.type === "AUDIO_TOGGLE_SELF_MUTE") {
       const cur = muteState();
-      if (cur === 0) { setMuteState(1); return false; }
-      if (cur === 1) { setMuteState(2); return; }
-      if (cur === 2) { setMuteState(0); return; }
+      if (cur === 0) { setMuteState(1); return false; } // Entra no Fake (bloqueia o mute real)
+      if (cur === 1) { setMuteState(2); return; }       // Vai pro Real (deixa passar)
+      if (cur === 2) { setMuteState(0); return; }       // Desmuta tudo
     }
+    
     if (dispatch.type === "AUDIO_TOGGLE_SELF_DEAF") {
       const cur = deafenState();
-      if (cur === 0) { setDeafenState(1); return false; }
-      if (cur === 1) { setDeafenState(2); return; }
-      if (cur === 2) { setDeafenState(0); return; }
+      if (cur === 0) { setDeafenState(1); return false; } // Entra no Fake (bloqueia o deafen real)
+      if (cur === 1) { setDeafenState(2); return; }       // Vai pro Real (deixa passar)
+      if (cur === 2) { setDeafenState(0); return; }       // Limpa tudo
+    }
+
+    // 2. Engana a UI do Discord forçando o estado visual nos updates de voz
+    if (dispatch.type === "VOICE_STATE_UPDATE" || dispatch.type === "VOICE_STATE_UPDATES") {
+      const currentUserId = storesFlat.UserStore?.getCurrentUser()?.id;
+
+      const updateState = (voiceState) => {
+        if (voiceState && voiceState.userId === currentUserId) {
+          if (muteState() === 1) voiceState.selfMute = true;
+          if (deafenState() === 1) voiceState.selfDeaf = true;
+        }
+      };
+
+      if (dispatch.voiceStates) {
+        dispatch.voiceStates.forEach(updateState);
+      } else {
+        updateState(dispatch);
+      }
     }
   });
-
-  uninterceptHttp = shelter.http.intercept(
-    "PATCH",
-    /\/channels\/\d+\/voice-states\/@me/,
-    (req) => {
-      if (!req.body) return;
-      if (muteState()   === 1) req.body.self_mute = true;
-      if (deafenState() === 1) req.body.self_deaf = true;
-    }
-  );
 }
 
 function uninstall() {
   uninterceptFlux?.();
-  uninterceptHttp?.();
   uninterceptFlux = null;
-  uninterceptHttp = null;
 }
 
 // ── indicadores visuais ───────────────────────────────────────────────────────
@@ -90,8 +97,13 @@ function updateIndicator(id, state, colors, labels) {
   el.textContent = labels[state];
 }
 
+// Sincroniza os signals do Solid-js diretamente com a manipulação do DOM
+createEffect(() => {
+  updateIndicator(INDICATOR_ID_MUTE,   muteState(),   MUTE_COLORS,   MUTE_LABEL);
+  updateIndicator(INDICATOR_ID_DEAFEN, deafenState(), DEAFEN_COLORS, DEAFEN_LABEL);
+});
+
 function injectIndicators() {
-  // Busca os botões de mute e deafen pelo aria-label
   const tryInject = () => {
     const buttons = document.querySelectorAll('[class*="buttonWrapper"]');
     let muteBtn = null;
@@ -103,7 +115,6 @@ function injectIndicators() {
       if (/deafen|ensurdec|headphone/i.test(label)) deafenBtn = btn;
     });
 
-    // fallback: pega pelos ícones na barra de voz
     if (!muteBtn || !deafenBtn) {
       const voiceBar = document.querySelector('[class*="panels"]') || document.querySelector('[class*="voiceControlsContainer"]');
       if (voiceBar) {
@@ -127,30 +138,21 @@ function injectIndicators() {
       deafenBtn.appendChild(ind);
     }
 
+    // Força uma atualização inicial assim que injetado
     updateIndicator(INDICATOR_ID_MUTE,   muteState(),   MUTE_COLORS,   MUTE_LABEL);
     updateIndicator(INDICATOR_ID_DEAFEN, deafenState(), DEAFEN_COLORS, DEAFEN_LABEL);
   };
 
-  // Tenta injetar agora e de novo quando o DOM mudar
   tryInject();
 
   const obs = scoped.observeDom('[class*="panels"], [class*="voiceControlsContainer"]', () => {
     setTimeout(tryInject, 100);
   });
 
-  // Atualiza os indicadores quando o estado mudar
-  const unsubMute = scoped.flux.subscribe("AUDIO_TOGGLE_SELF_MUTE", () => {
-    setTimeout(() => updateIndicator(INDICATOR_ID_MUTE, muteState(), MUTE_COLORS, MUTE_LABEL), 50);
-  });
-  const unsubDeaf = scoped.flux.subscribe("AUDIO_TOGGLE_SELF_DEAF", () => {
-    setTimeout(() => updateIndicator(INDICATOR_ID_DEAFEN, deafenState(), DEAFEN_COLORS, DEAFEN_LABEL), 50);
-  });
-
   cleanupIndicators = () => {
     document.getElementById(INDICATOR_ID_MUTE)?.remove();
     document.getElementById(INDICATOR_ID_DEAFEN)?.remove();
-    unsubMute?.();
-    unsubDeaf?.();
+    obs?.();
   };
 }
 
@@ -162,17 +164,6 @@ export function onLoad() {
 }
 
 export function onUnload() {
-  if (muteState() === 1 || deafenState() === 1) {
-    shelter.http.ready.then(() => {
-      const channelId = storesFlat.SelectedChannelStore?.getVoiceChannelId?.();
-      if (channelId) {
-        shelter.http.patch({
-          url: `/channels/${channelId}/voice-states/@me`,
-          body: { self_mute: false, self_deaf: false },
-        }).catch(() => {});
-      }
-    });
-  }
   setMuteState(0);
   setDeafenState(0);
   cleanupIndicators?.();
@@ -216,7 +207,7 @@ export const settings = () => (
     <Divider />
     <div style={{ margin: "8px 0" }}>
       <StateRow label="Microfone" state={muteState}   labels={LABELS_MUTE}   colors={COLORS} />
-      <StateRow label="Áudio"     state={deafenState} labels={LABELS_DEAFEN} colors={COLORS} />
+      <StateRow label="Áudio"      state={deafenState} labels={LABELS_DEAFEN} colors={COLORS} />
     </div>
     <Divider />
     <Text style={{ marginTop: "8px", opacity: 0.5, fontSize: "12px", color: "var(--status-danger)" }}>
