@@ -73,12 +73,52 @@ const DEAFEN_LABEL = [
 ];
 let uninterceptFlux = null;
 let cleanupIndicators = null;
+const originalWsSend = window.WebSocket.prototype.send;
+let gatewaySocket = null;
+function installWebSocketHook() {
+	window.WebSocket.prototype.send = function(data) {
+		if (this.url && this.url.includes("gateway.discord.gg")) gatewaySocket = this;
+		if (typeof data === "string") try {
+			const parsed = JSON.parse(data);
+			if (parsed.op === 4 && parsed.d) {
+				if (muteState() === 1) parsed.d.self_mute = true;
+				if (deafenState() === 1) parsed.d.self_deaf = true;
+				data = JSON.stringify(parsed);
+			}
+		} catch (e) {}
+		return originalWsSend.apply(this, arguments);
+	};
+}
+function removeWebSocketHook() {
+	window.WebSocket.prototype.send = originalWsSend;
+	gatewaySocket = null;
+}
+function forceGatewayUpdate() {
+	if (!gatewaySocket) return;
+	const channelId = storesFlat.SelectedChannelStore?.getVoiceChannelId?.();
+	const guildId = storesFlat.SelectedChannelStore?.getGuildId?.() || null;
+	if (channelId) {
+		const payload = {
+			op: 4,
+			d: {
+				guild_id: guildId,
+				channel_id: channelId,
+				self_mute: muteState() === 1 ? true : false,
+				self_deaf: deafenState() === 1 ? true : false,
+				self_video: false
+			}
+		};
+		originalWsSend.call(gatewaySocket, JSON.stringify(payload));
+	}
+}
 function install() {
+	installWebSocketHook();
 	uninterceptFlux = scoped.flux.intercept((dispatch) => {
 		if (dispatch.type === "AUDIO_TOGGLE_SELF_MUTE") {
 			const cur = muteState();
 			if (cur === 0) {
 				setMuteState(1);
+				forceGatewayUpdate();
 				return false;
 			}
 			if (cur === 1) {
@@ -94,6 +134,7 @@ function install() {
 			const cur = deafenState();
 			if (cur === 0) {
 				setDeafenState(1);
+				forceGatewayUpdate();
 				return false;
 			}
 			if (cur === 1) {
@@ -105,22 +146,12 @@ function install() {
 				return;
 			}
 		}
-		if (dispatch.type === "VOICE_STATE_UPDATE" || dispatch.type === "VOICE_STATE_UPDATES") {
-			const currentUserId = storesFlat.UserStore?.getCurrentUser()?.id;
-			const updateState = (voiceState) => {
-				if (voiceState && voiceState.userId === currentUserId) {
-					if (muteState() === 1) voiceState.selfMute = true;
-					if (deafenState() === 1) voiceState.selfDeaf = true;
-				}
-			};
-			if (dispatch.voiceStates) dispatch.voiceStates.forEach(updateState);
-else updateState(dispatch);
-		}
 	});
 }
 function uninstall() {
 	uninterceptFlux?.();
 	uninterceptFlux = null;
+	removeWebSocketHook();
 }
 const INDICATOR_ID_MUTE = "fmd-indicator-mute";
 const INDICATOR_ID_DEAFEN = "fmd-indicator-deafen";
@@ -205,8 +236,11 @@ function onLoad() {
 	injectIndicators();
 }
 function onUnload() {
-	setMuteState(0);
-	setDeafenState(0);
+	if (muteState() === 1 || deafenState() === 1) {
+		setMuteState(0);
+		setDeafenState(0);
+		forceGatewayUpdate();
+	}
 	cleanupIndicators?.();
 	uninstall();
 }
@@ -263,14 +297,14 @@ const settings = () => (() => {
 		get tag() {
 			return HeaderTags.H4;
 		},
-		children: "Fake Mute & Deafen"
+		children: "Fake Mute & Deafen (Gateway Exploit)"
 	}), _el$10, _co$4);
 	(0, import_web$4.insert)(_el$5, (0, import_web$5.createComponent)(Text, {
 		style: {
 			marginBottom: "12px",
 			opacity: .7
 		},
-		children: "Clique 1 → Fake \xA0|\xA0 Clique 2 → Real \xA0|\xA0 Clique 3 → Desativa"
+		children: "Clique 1 → Fake (Rede) \xA0|\xA0 Clique 2 → Real \xA0|\xA0 Clique 3 → Desativa"
 	}), _el$12, _co$5);
 	(0, import_web$4.insert)(_el$5, (0, import_web$5.createComponent)(Divider, {}), _el$14, _co$6);
 	_el$6.style.setProperty("margin", "8px 0");
@@ -294,7 +328,7 @@ const settings = () => (() => {
 			fontSize: "12px",
 			color: "var(--status-danger)"
 		},
-		children: "⚠ Uso de mods pode violar os Termos de Serviço do Discord."
+		children: "⚠ Este método adultera os pacotes WebSocket do Discord. Pode ser instável dependendo do servidor RTC."
 	}), _el$18, _co$8);
 	return _el$5;
 })();
