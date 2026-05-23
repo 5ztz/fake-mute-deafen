@@ -72,7 +72,6 @@ const DEAFEN_LABEL = [
 	"REAL"
 ];
 let uninterceptFlux = null;
-let uninterceptHttp = null;
 let cleanupIndicators = null;
 function install() {
 	uninterceptFlux = scoped.flux.intercept((dispatch) => {
@@ -106,18 +105,22 @@ function install() {
 				return;
 			}
 		}
-	});
-	uninterceptHttp = shelter.http.intercept("PATCH", /\/channels\/\d+\/voice-states\/@me/, (req) => {
-		if (!req.body) return;
-		if (muteState() === 1) req.body.self_mute = true;
-		if (deafenState() === 1) req.body.self_deaf = true;
+		if (dispatch.type === "VOICE_STATE_UPDATE" || dispatch.type === "VOICE_STATE_UPDATES") {
+			const currentUserId = storesFlat.UserStore?.getCurrentUser()?.id;
+			const updateState = (voiceState) => {
+				if (voiceState && voiceState.userId === currentUserId) {
+					if (muteState() === 1) voiceState.selfMute = true;
+					if (deafenState() === 1) voiceState.selfDeaf = true;
+				}
+			};
+			if (dispatch.voiceStates) dispatch.voiceStates.forEach(updateState);
+else updateState(dispatch);
+		}
 	});
 }
 function uninstall() {
 	uninterceptFlux?.();
-	uninterceptHttp?.();
 	uninterceptFlux = null;
-	uninterceptHttp = null;
 }
 const INDICATOR_ID_MUTE = "fmd-indicator-mute";
 const INDICATOR_ID_DEAFEN = "fmd-indicator-deafen";
@@ -150,6 +153,10 @@ function updateIndicator(id, state, colors, labels) {
 	el.style.background = colors[state];
 	el.textContent = labels[state];
 }
+(0, import_solid_js.createEffect)(() => {
+	updateIndicator(INDICATOR_ID_MUTE, muteState(), MUTE_COLORS, MUTE_LABEL);
+	updateIndicator(INDICATOR_ID_DEAFEN, deafenState(), DEAFEN_COLORS, DEAFEN_LABEL);
+});
 function injectIndicators() {
 	const tryInject = () => {
 		const buttons = document.querySelectorAll("[class*=\"buttonWrapper\"]");
@@ -187,17 +194,10 @@ function injectIndicators() {
 	const obs = scoped.observeDom("[class*=\"panels\"], [class*=\"voiceControlsContainer\"]", () => {
 		setTimeout(tryInject, 100);
 	});
-	const unsubMute = scoped.flux.subscribe("AUDIO_TOGGLE_SELF_MUTE", () => {
-		setTimeout(() => updateIndicator(INDICATOR_ID_MUTE, muteState(), MUTE_COLORS, MUTE_LABEL), 50);
-	});
-	const unsubDeaf = scoped.flux.subscribe("AUDIO_TOGGLE_SELF_DEAF", () => {
-		setTimeout(() => updateIndicator(INDICATOR_ID_DEAFEN, deafenState(), DEAFEN_COLORS, DEAFEN_LABEL), 50);
-	});
 	cleanupIndicators = () => {
 		document.getElementById(INDICATOR_ID_MUTE)?.remove();
 		document.getElementById(INDICATOR_ID_DEAFEN)?.remove();
-		unsubMute?.();
-		unsubDeaf?.();
+		obs?.();
 	};
 }
 function onLoad() {
@@ -205,16 +205,6 @@ function onLoad() {
 	injectIndicators();
 }
 function onUnload() {
-	if (muteState() === 1 || deafenState() === 1) shelter.http.ready.then(() => {
-		const channelId = storesFlat.SelectedChannelStore?.getVoiceChannelId?.();
-		if (channelId) shelter.http.patch({
-			url: `/channels/${channelId}/voice-states/@me`,
-			body: {
-				self_mute: false,
-				self_deaf: false
-			}
-		}).catch(() => {});
-	});
 	setMuteState(0);
 	setDeafenState(0);
 	cleanupIndicators?.();
